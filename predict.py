@@ -4,7 +4,7 @@ import subprocess
 
 import torch
 
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 from tensorizer import TensorDeserializer
 from tensorizer.utils import no_init_or_tensor
 from collections import OrderedDict
@@ -14,10 +14,10 @@ from cog import BasePredictor, ConcatenateIterator, Input, Path
 # from config import DEFAULT_MODEL_NAME, DEFAULT_CONFIG_PATH, load_tokenizer, load_tensorizer
 from subclass import YieldingLlama
 
-TENSORIZER_WEIGHTS_PATH = "models/vicuna-13b/tensorized/vicuna-13b-16fp.tensors"  # path from which we pull weights when there's no COG_WEIGHTS environment variable
+TENSORIZER_WEIGHTS_PATH = "models/cyberagent/open-calm-7b/"  # path from which we pull weights when there's no COG_WEIGHTS environment variable
 
-DEFAULT_CONFIG_PATH = "models/vicuna-13b/config.json"
-TOKENIZER_PATH = "models/vicuna-13b"
+DEFAULT_CONFIG_PATH = "cyberagent/open-calm-7b/config.json"
+TOKENIZER_PATH = "cyberagent/open-calm-7b"
 
 def maybe_download(path):
     if path.startswith("gs://"):
@@ -34,29 +34,27 @@ class Predictor(BasePredictor):
             # bugfix
             weights = None
         if weights is None and TENSORIZER_WEIGHTS_PATH:
-            self.model = self.load_tensorizer(
-                weights=maybe_download(TENSORIZER_WEIGHTS_PATH), plaid_mode=True, cls=YieldingLlama, config_path=DEFAULT_CONFIG_PATH,
-            )
+            self.model = self.load_tensorizer()
         
         elif hasattr(weights, "filename") and "tensors" in weights.filename:
             self.model = self.load_tensorizer(
-                weights=weights, plaid_mode=True, cls=YieldingLlama, config_path=DEFAULT_CONFIG_PATH,
+                weights=weights, plaid_mode=True, cls=AutoTokenizer, config_path=DEFAULT_CONFIG_PATH,
             )
         elif hasattr(weights, "suffix") and "tensors" in weights.suffix:
             self.model = self.load_tensorizer(
-                weights=weights, plaid_mode=True, cls=YieldingLlama
+                weights=weights, plaid_mode=True, cls=AutoTokenizer
             )
         elif "tensors" in weights:
             self.model = self.load_tensorizer(
-                weights=weights, plaid_mode=True, cls=YieldingLlama
+                weights=weights, plaid_mode=True, cls=AutoTokenizer
             )
         else:
             self.model = self.load_huggingface_model(weights=weights)
 
-        self.tokenizer = self.load_tokenizer(TOKENIZER_PATH)
+        self.tokenizer = self.load_tokenizer()
     
-    def load_tokenizer(self, path):
-        tokenizer = AutoTokenizer.from_pretrained(path)
+    def load_tokenizer(self):
+        tokenizer = AutoTokenizer.from_pretrained("cyberagent/open-calm-7b")
         return tokenizer
 
     def load_huggingface_model(self, weights=None):
@@ -69,19 +67,12 @@ class Predictor(BasePredictor):
         print(f"weights loaded in {time.time() - st}")
         return model
     
-    def load_tensorizer(self, weights, plaid_mode, cls, config_path):
+    def load_tensorizer(self):
         st = time.time()
-        print(f"deserializing weights from {weights}")
-        config = AutoConfig.from_pretrained(config_path)
+        print(f"deserializing weights")
 
-        model = no_init_or_tensor(
-            lambda: cls.from_pretrained(
-                None, config=config, state_dict=OrderedDict()
-            )
-        )
+        model = AutoModelForCausalLM.from_pretrained("cyberagent/open-calm-7b", device_map="auto")
 
-        des = TensorDeserializer(weights, plaid_mode=True)
-        des.load_into_module(model)
         print(f"weights loaded in {time.time() - st}")
         return model
 
@@ -120,7 +111,8 @@ class Predictor(BasePredictor):
             description="provide debugging output in logs", default=False
         ),
     ) -> ConcatenateIterator[str]:
-        input = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        # input = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
         n_new_tokens = 1
 
         if seed != -1:
@@ -130,60 +122,74 @@ class Predictor(BasePredictor):
         
         print(f"seed: {seed}")
 
-        with torch.inference_mode():
-            first_token_yielded = False
-            prev_ids = []
-            for output in self.model.generate(
-                input,
-                max_length=max_length,
+        # with torch.inference_mode():
+        #     first_token_yielded = False
+        #     prev_ids = []
+        #     for output in self.model.generate(
+        #         input,
+        #         max_length=max_length,
+        #         do_sample=True,
+        #         temperature=temperature,
+        #         top_p=top_p,
+        #         repetition_penalty=repetition_penalty,
+        #     ):
+        #         n_new_tokens += 1
+
+        #         cur_id = output.item()
+
+        #         # in order to properly handle spaces, we need to do our own tokenizing. Fun!
+        #         # we're building up a buffer of sub-word / punctuation tokens until we hit a space, and then yielding whole words + punctuation.
+        #         cur_token = self.tokenizer.convert_ids_to_tokens(cur_id)
+
+        #         # skip initial newline, which this almost always yields. hack - newline id = 13.
+        #         if not first_token_yielded and not prev_ids and cur_id == 13:
+        #             continue
+
+        #         # underscore means a new word, means we yield previous tokens
+        #         if cur_token.startswith("▁"):  # this is not a standard underscore.
+        #             # first token
+        #             if not prev_ids:
+        #                 prev_ids = [cur_id]
+        #                 continue
+
+        #             # there are tokens to yield
+        #             else:
+        #                 token = self.tokenizer.decode(prev_ids) + ' '
+        #                 prev_ids = [cur_id]
+
+        #                 if not first_token_yielded:
+        #                     # no leading space for first token
+        #                     token = token.strip()
+        #                     first_token_yielded = True
+        #                 yield token
+        #         else:
+        #             prev_ids.append(cur_id)
+        #             continue
+
+        #     # remove any special tokens such as </s>
+        #     token = self.tokenizer.decode(prev_ids, skip_special_tokens=True)
+        #     if not first_token_yielded:
+        #         # no leading space for first token
+        #         token = token.strip()
+        #         first_token_yielded = True
+        #     yield token
+        with torch.no_grad():
+            tokens = self.model.generate(
+                **inputs,
+                max_new_tokens=max_length,
                 do_sample=True,
                 temperature=temperature,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
-            ):
-                n_new_tokens += 1
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
 
-                cur_id = output.item()
-
-                # in order to properly handle spaces, we need to do our own tokenizing. Fun!
-                # we're building up a buffer of sub-word / punctuation tokens until we hit a space, and then yielding whole words + punctuation.
-                cur_token = self.tokenizer.convert_ids_to_tokens(cur_id)
-
-                # skip initial newline, which this almost always yields. hack - newline id = 13.
-                if not first_token_yielded and not prev_ids and cur_id == 13:
-                    continue
-
-                # underscore means a new word, means we yield previous tokens
-                if cur_token.startswith("▁"):  # this is not a standard underscore.
-                    # first token
-                    if not prev_ids:
-                        prev_ids = [cur_id]
-                        continue
-
-                    # there are tokens to yield
-                    else:
-                        token = self.tokenizer.decode(prev_ids) + ' '
-                        prev_ids = [cur_id]
-
-                        if not first_token_yielded:
-                            # no leading space for first token
-                            token = token.strip()
-                            first_token_yielded = True
-                        yield token
-                else:
-                    prev_ids.append(cur_id)
-                    continue
-
-            # remove any special tokens such as </s>
-            token = self.tokenizer.decode(prev_ids, skip_special_tokens=True)
-            if not first_token_yielded:
-                # no leading space for first token
-                token = token.strip()
-                first_token_yielded = True
-            yield token
+            output = self.tokenizer.decode(tokens[0], skip_special_tokens=True)
+            yield output
 
         if debug:
             n_tokens_in_prompt = len(self.tokenizer(prompt)["input_ids"])
+            n_new_tokens = len(tokens[0]) - n_tokens_in_prompt
             print(f"Number of tokens in prompt: {n_tokens_in_prompt}")
             print(f"Number of tokens generated: {n_new_tokens}")
             print(f"cur memory: {torch.cuda.memory_allocated()}")
